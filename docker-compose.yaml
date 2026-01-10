@@ -12,8 +12,8 @@ services:
       - LON=0.0
       - WEEK=1
       - SF_THRESH=0.10
-      - YAMNET_THRESH=0.15
-      - MIN_CONFIDENCE=0.15
+      - YAMNET_THRESH=0.25
+      - MIN_CONFIDENCE=0.25
       - OUTPUT_DIR=/data
       - DB_PATH=/data/birdnet.db
       - MQTT_HOST=${MQTT_HOST}

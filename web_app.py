@@ -21,8 +21,8 @@ AUDIO_DIR = os.environ.get('AUDIO_DIR', '/data')
 CONFIG_PATH = os.environ.get('CONFIG_PATH', '/data/config.json')
 
 DEFAULT_CONFIG = {
-    'yamnet_threshold': 0.15,
-    'min_confidence': 0.15,
+    'yamnet_threshold': 0.25,
+    'min_confidence': 0.25,
     'sf_thresh': 0.10,
     'chunk_duration': 5,
     'latitude': 0.0,
