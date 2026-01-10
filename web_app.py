@@ -3,8 +3,16 @@
 import os
 import json
 import sqlite3
+import subprocess
+import re
 from datetime import datetime, timedelta
 from flask import Flask, jsonify, render_template_string, send_from_directory, abort, request
+
+try:
+    import docker
+    docker_client = docker.from_env()
+except:
+    docker_client = None
 
 app = Flask(__name__)
 
@@ -13,8 +21,8 @@ AUDIO_DIR = os.environ.get('AUDIO_DIR', '/data')
 CONFIG_PATH = os.environ.get('CONFIG_PATH', '/data/config.json')
 
 DEFAULT_CONFIG = {
-    'yamnet_threshold': 0.25,
-    'min_confidence': 0.25,
+    'yamnet_threshold': 0.15,
+    'min_confidence': 0.15,
     'sf_thresh': 0.10,
     'chunk_duration': 5,
     'latitude': 0.0,
@@ -260,15 +268,51 @@ HTML_TEMPLATE = '''
             font-size: 0.85rem;
             margin-top: 30px;
         }
+        /* Status indicator states */
+        .status-dot.listening { background: var(--success); animation: pulse 2s infinite; }
+        .status-dot.stale { background: #f39c12; animation: pulse 1s infinite; }
+        .status-dot.offline { background: var(--accent); animation: none; }
+        /* Logs Panel */
+        .log-container {
+            background: #0a0a12;
+            border-radius: 12px;
+            padding: 15px;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.8rem;
+            max-height: 500px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .log-line { padding: 2px 0; border-bottom: 1px solid #1a1a2e; }
+        .log-line:last-child { border-bottom: none; }
+        .log-line.info { color: #4ecca3; }
+        .log-line.warning { color: #f39c12; }
+        .log-line.error { color: #e94560; }
+        .log-line.debug { color: #888; }
+        .log-controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .log-controls select {
+            padding: 8px 12px;
+            border-radius: 8px;
+            border: 1px solid var(--bg-card);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
             <h1>BirdNET Monitor</h1>
-            <div class="status">
-                <div class="status-dot"></div>
-                <span>Listening</span>
+            <div class="status" id="detector-status">
+                <div class="status-dot offline" id="status-dot"></div>
+                <span id="status-text">Checking...</span>
             </div>
         </header>
         
@@ -293,6 +337,7 @@ HTML_TEMPLATE = '''
         
         <div class="tabs">
             <button class="tab active" data-tab="detections">Recent Detections</button>
+            <button class="tab" data-tab="logs">Logs</button>
             <button class="tab" data-tab="settings">Settings</button>
         </div>
         
@@ -301,7 +346,25 @@ HTML_TEMPLATE = '''
                 <div class="empty-state">Loading detections...</div>
             </div>
         </div>
-        
+
+        <div id="logs-tab" class="tab-content">
+            <div class="log-controls">
+                <select id="log-lines">
+                    <option value="50">Last 50 lines</option>
+                    <option value="100" selected>Last 100 lines</option>
+                    <option value="200">Last 200 lines</option>
+                    <option value="500">Last 500 lines</option>
+                </select>
+                <button class="btn btn-secondary" onclick="loadLogs()">Refresh</button>
+                <label style="margin-left: auto; display: flex; align-items: center; gap: 5px;">
+                    <input type="checkbox" id="auto-scroll" checked> Auto-scroll
+                </label>
+            </div>
+            <div class="log-container" id="log-container">
+                <div class="log-line debug">Loading logs...</div>
+            </div>
+        </div>
+
         <div id="settings-tab" class="tab-content">
             <div class="settings-grid">
                 <div class="setting-group">
@@ -546,9 +609,72 @@ HTML_TEMPLATE = '''
             }
         }
         
+        // Load logs
+        async function loadLogs() {
+            const lines = document.getElementById('log-lines').value;
+            try {
+                const resp = await fetch(`/api/logs?lines=${lines}`);
+                const data = await resp.json();
+                const container = document.getElementById('log-container');
+                container.innerHTML = '';
+
+                data.logs.forEach(line => {
+                    const div = document.createElement('div');
+                    div.className = 'log-line';
+                    if (line.includes('[ERROR]') || line.includes('Error') || line.includes('error')) {
+                        div.className += ' error';
+                    } else if (line.includes('[WARNING]') || line.includes('Warning')) {
+                        div.className += ' warning';
+                    } else if (line.includes('[INFO]')) {
+                        div.className += ' info';
+                    } else {
+                        div.className += ' debug';
+                    }
+                    div.textContent = line;
+                    container.appendChild(div);
+                });
+
+                if (document.getElementById('auto-scroll').checked) {
+                    container.scrollTop = container.scrollHeight;
+                }
+            } catch (err) {
+                console.error('Failed to load logs:', err);
+            }
+        }
+
+        // Check detector status
+        async function checkStatus() {
+            try {
+                const resp = await fetch('/api/detector-status');
+                const data = await resp.json();
+                const dot = document.getElementById('status-dot');
+                const text = document.getElementById('status-text');
+
+                dot.className = 'status-dot ' + data.status;
+                if (data.status === 'listening') {
+                    text.textContent = 'Listening';
+                } else if (data.status === 'stale') {
+                    text.textContent = `Stale (${data.minutes_ago}m ago)`;
+                } else {
+                    text.textContent = 'Offline';
+                }
+            } catch (err) {
+                document.getElementById('status-dot').className = 'status-dot offline';
+                document.getElementById('status-text').textContent = 'Unknown';
+            }
+        }
+
         loadData();
         loadSettings();
+        loadLogs();
+        checkStatus();
         setInterval(loadData, 30000);
+        setInterval(checkStatus, 15000);
+        setInterval(() => {
+            if (document.getElementById('logs-tab').classList.contains('active')) {
+                loadLogs();
+            }
+        }, 10000);
     </script>
 </body>
 </html>
@@ -638,10 +764,12 @@ def config():
 
 @app.route('/api/restart', methods=['POST'])
 def restart():
-    import subprocess
     try:
-        # Signal the detector to restart (via docker)
-        subprocess.run(['docker', 'restart', 'birdnet-detector'], check=True, capture_output=True)
+        if docker_client is None:
+            return jsonify({'status': 'error', 'message': 'Docker client not available'}), 500
+
+        container = docker_client.containers.get('birdnet-detector')
+        container.restart()
         return jsonify({'status': 'ok'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -660,6 +788,58 @@ def serve_audio(filename):
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'})
+
+@app.route('/api/logs')
+def logs():
+    lines = min(int(request.args.get('lines', 100)), 1000)
+    try:
+        if docker_client is None:
+            return jsonify({'logs': ['Docker client not available']}), 500
+
+        container = docker_client.containers.get('birdnet-detector')
+        log_output = container.logs(tail=lines, timestamps=False).decode('utf-8', errors='replace')
+        log_lines = log_output.strip().split('\n') if log_output.strip() else []
+        return jsonify({'logs': log_lines})
+    except Exception as e:
+        return jsonify({'logs': [f'Error: {str(e)}']}), 500
+
+@app.route('/api/detector-status')
+def detector_status():
+    try:
+        if docker_client is None:
+            return jsonify({'status': 'offline', 'error': 'Docker client not available'})
+
+        container = docker_client.containers.get('birdnet-detector')
+
+        # Check container status first
+        if container.status != 'running':
+            return jsonify({'status': 'offline', 'container_status': container.status})
+
+        # Get last few log lines and check timestamp
+        log_output = container.logs(tail=20, timestamps=False).decode('utf-8', errors='replace')
+
+        # Parse timestamps from log lines (format: 2026-01-10 17:09:07 [INFO])
+        timestamps = re.findall(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', log_output)
+
+        if not timestamps:
+            return jsonify({'status': 'offline', 'last_activity': None})
+
+        # Get most recent timestamp
+        last_ts = timestamps[-1]
+        last_dt = datetime.strptime(last_ts, '%Y-%m-%d %H:%M:%S')
+        now = datetime.utcnow()
+        diff = now - last_dt
+        minutes_ago = int(diff.total_seconds() / 60)
+
+        if minutes_ago < 2:
+            return jsonify({'status': 'listening', 'minutes_ago': minutes_ago, 'last_activity': last_ts})
+        elif minutes_ago < 10:
+            return jsonify({'status': 'stale', 'minutes_ago': minutes_ago, 'last_activity': last_ts})
+        else:
+            return jsonify({'status': 'offline', 'minutes_ago': minutes_ago, 'last_activity': last_ts})
+
+    except Exception as e:
+        return jsonify({'status': 'offline', 'error': str(e)})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)

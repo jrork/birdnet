@@ -29,6 +29,7 @@ RUN pip install --upgrade pip setuptools wheel \
       paho-mqtt \
       flask \
       gunicorn \
+      docker \
       git+https://github.com/kahst/BirdNET-Analyzer.git@main
 
 # 4) Copy scripts
