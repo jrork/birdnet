@@ -4,6 +4,7 @@ import subprocess
 import logging
 import sqlite3
 import json
+import select
 import numpy as np
 import scipy.io.wavfile as wavfile
 import tensorflow as tf
@@ -35,6 +36,7 @@ MQTT_TOPIC     = os.environ.get('MQTT_TOPIC', 'birdnet/detection')
 CHANNELS    = 1
 BYTES_PER_S = 2
 CHUNK_SIZE  = SR * CHUNK_DUR * BYTES_PER_S
+READ_TIMEOUT = int(os.environ.get('READ_TIMEOUT', 30))  # seconds before restarting FFmpeg
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ── LOGGING ─────────────────────────────────────────────────────────
@@ -219,6 +221,15 @@ def main():
     chunk_count = 0
     try:
         while True:
+            # Wait for data with timeout to detect hung streams
+            ready, _, _ = select.select([proc.stdout], [], [], READ_TIMEOUT)
+            if not ready:
+                logger.warning("Read timeout (%ds), no data from stream - reconnecting…", READ_TIMEOUT)
+                proc.kill()
+                proc = get_ffmpeg_proc()
+                chunk_count = 0
+                continue
+
             raw = proc.stdout.read(CHUNK_SIZE)
             if len(raw) != CHUNK_SIZE:
                 logger.warning("Short read (%d bytes), reconnecting…", len(raw))
