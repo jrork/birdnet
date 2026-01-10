@@ -214,8 +214,9 @@ def main():
     init_db()
     init_mqtt()
     cleanup_old_txt_files()
-    
+
     proc = get_ffmpeg_proc()
+    chunk_count = 0
     try:
         while True:
             raw = proc.stdout.read(CHUNK_SIZE)
@@ -223,7 +224,13 @@ def main():
                 logger.warning("Short read (%d bytes), reconnecting…", len(raw))
                 proc.kill()
                 proc = get_ffmpeg_proc()
+                chunk_count = 0
                 continue
+
+            chunk_count += 1
+            # Log heartbeat every 12 chunks (~1 minute at 5s chunks)
+            if chunk_count % 12 == 0:
+                logger.info("Heartbeat: processed %d chunks", chunk_count)
 
             audio_np = np.frombuffer(raw, dtype=np.int16)
             if is_bird_present(audio_np):
