@@ -1,0 +1,61 @@
+services:
+  birdnet-detector:
+    build: .
+    container_name: birdnet-detector
+    restart: unless-stopped
+    command: python3 stream_birdnet.py
+    environment:
+      - RTSP_URL=${RTSP_URL}
+      - SAMPLE_RATE=16000
+      - CHUNK_DURATION=5
+      - LAT=0.0
+      - LON=0.0
+      - WEEK=1
+      - SF_THRESH=0.10
+      - YAMNET_THRESH=0.25
+      - MIN_CONFIDENCE=0.25
+      - OUTPUT_DIR=/data
+      - DB_PATH=/data/birdnet.db
+      - MQTT_HOST=${MQTT_HOST}
+      - MQTT_PORT=1883
+      - MQTT_USER=${MQTT_USER}
+      - MQTT_PASS=${MQTT_PASS}
+      - MQTT_TOPIC=birdnet/detection
+    volumes:
+      - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      - birdnet-web
+
+  birdnet-web:
+    build: .
+    container_name: birdnet-web
+    restart: unless-stopped
+    command: gunicorn -w 2 -b 0.0.0.0:5000 web_app:app
+    environment:
+      - DB_PATH=/data/birdnet.db
+      - AUDIO_DIR=/data
+    volumes:
+      - ./data:/data
+    ports:
+      - "5088:5000"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.birdnet.rule=Host(`${BIRDNET_HOST:-birdnet.local}`)"
+      - "traefik.http.routers.birdnet.entrypoints=websecure"
+      - "traefik.http.routers.birdnet.tls.certresolver=letsencrypt"
+      - "traefik.http.services.birdnet.loadbalancer.server.port=5000"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  default:
+    name: traefik
+    external: true
