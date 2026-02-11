@@ -10,7 +10,6 @@ services:
       - CHUNK_DURATION=5
       - LAT=0.0
       - LON=0.0
-      - WEEK=1
       - SF_THRESH=0.10
       - YAMNET_THRESH=0.25
       - MIN_CONFIDENCE=0.25

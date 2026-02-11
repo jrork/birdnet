@@ -9,6 +9,7 @@ import numpy as np
 import scipy.io.wavfile as wavfile
 import tensorflow as tf
 import tensorflow_hub as hub
+import csv
 import paho.mqtt.client as mqtt
 from datetime import datetime
 from pathlib import Path
@@ -21,7 +22,7 @@ OUTPUT_DIR     = os.environ.get('OUTPUT_DIR', '/data')
 DB_PATH        = os.environ.get('DB_PATH', '/data/birdnet.db')
 LAT            = os.environ.get('LAT', '0.0')
 LON            = os.environ.get('LON', '0.0')
-WEEK           = os.environ.get('WEEK', '1')
+WEEK           = os.environ.get('WEEK', str(datetime.utcnow().isocalendar()[1]))
 SF_THRESH      = os.environ.get('SF_THRESH', '0.10')
 YAMNET_THRESH  = float(os.environ.get('YAMNET_THRESH', '0.25'))
 MIN_CONFIDENCE = float(os.environ.get('MIN_CONFIDENCE', '0.10'))
@@ -114,7 +115,20 @@ def publish_detection(timestamp, common_name, species_code, confidence, audio_fi
 logger.info("Loading YAMNet model from TF-Hub…")
 yamnet_model = hub.load("https://tfhub.dev/google/yamnet/1")
 with open('/app/yamnet_class_map.csv', 'r') as f:
-    labels = [line.strip() for line in f]
+    reader = csv.reader(f)
+    next(reader)  # skip header
+    yamnet_labels = {int(row[0]): row[2] for row in reader}
+
+# YAMNet class indices for all bird-related sounds
+BIRD_CLASS_INDICES = set()
+BIRD_KEYWORDS = {'bird', 'chirp', 'tweet', 'squawk', 'pigeon', 'dove', 'crow',
+                 'caw', 'owl', 'hoot', 'fowl', 'chicken', 'rooster', 'crowing',
+                 'cock-a-doodle', 'duck', 'quack', 'goose', 'honk',
+                 'bird flight', 'flapping wings', 'coo'}
+for idx, name in yamnet_labels.items():
+    if any(kw in name.lower() for kw in BIRD_KEYWORDS):
+        BIRD_CLASS_INDICES.add(idx)
+        logger.info("Bird class %d: %s", idx, name)
 
 # ── FFMPEG PROCESS ──────────────────────────────────────────────────
 def get_ffmpeg_proc():
@@ -129,16 +143,25 @@ def get_ffmpeg_proc():
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
 # ── BIRD DETECTION (YAMNet pre-filter) ──────────────────────────────
+_diag_counter = 0
+
 def is_bird_present(audio_np):
+    global _diag_counter
+    _diag_counter += 1
     audio = audio_np.astype(np.float32) / 32768.0
     scores, _, _ = yamnet_model(audio)
     mean_scores = tf.reduce_mean(scores, axis=0).numpy()
-    top5 = np.argsort(mean_scores)[-5:][::-1]
-    for idx in top5:
-        label = labels[idx]
-        score = mean_scores[idx]
-        if 'bird' in label.lower() and score >= YAMNET_THRESH:
-            logger.info("YAMNet detected bird: %s (%.3f)", label, score)
+    top10 = np.argsort(mean_scores)[-10:][::-1]
+
+    # Log diagnostics every 60 chunks (~5 min at 5s chunks)
+    if _diag_counter % 60 == 0:
+        top_labels = [(yamnet_labels.get(i, '?'), mean_scores[i]) for i in top10[:5]]
+        logger.info("YAMNet top-5: %s", ", ".join(f"{l} ({s:.3f})" for l, s in top_labels))
+
+    for idx in top10:
+        if idx in BIRD_CLASS_INDICES and mean_scores[idx] >= YAMNET_THRESH:
+            label = yamnet_labels.get(idx, f"class_{idx}")
+            logger.info("YAMNet detected bird: %s (%.3f)", label, mean_scores[idx])
             return True
     return False
 
