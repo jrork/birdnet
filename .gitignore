@@ -20,3 +20,6 @@ venv/
 
 # Config with secrets (use .env.example as template)
 .env
+
+# Claude Code instructions (contains deployment-specific info)
+CLAUDE.md
