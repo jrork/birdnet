@@ -8,8 +8,8 @@ services:
       - RTSP_URL=${RTSP_URL}
       - SAMPLE_RATE=16000
       - CHUNK_DURATION=5
-      - LAT=0.0
-      - LON=0.0
+      - LAT=${LAT:-0.0}
+      - LON=${LON:-0.0}
       - SF_THRESH=0.10
       - YAMNET_THRESH=0.25
       - MIN_CONFIDENCE=0.25
