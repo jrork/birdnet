@@ -1,4 +1,3 @@
-# Use a slim Python image
 FROM python:3.11-slim
 
 # 1) Install system tools
@@ -32,6 +31,9 @@ RUN pip install --upgrade pip setuptools wheel \
       docker \
       git+https://github.com/kahst/BirdNET-Analyzer.git@main
 
+# 3b) Pin setuptools <82 — tensorflow-hub needs pkg_resources, removed in 82+
+RUN pip install "setuptools<82"
+
 # 4) Copy scripts
 COPY stream_birdnet.py /app/stream_birdnet.py
 COPY web_app.py /app/web_app.py
@@ -45,7 +47,7 @@ ENV RTSP_URL="rtsp://192.168.1.10:554/stream" \
     CHUNK_DURATION=5 \
     LAT=0.0 \
     LON=0.0 \
-    WEEK=1 \
+    WEEK="" \
     SF_THRESH=0.10 \
     YAMNET_THRESH=0.25 \
     MIN_CONFIDENCE=0.25 \

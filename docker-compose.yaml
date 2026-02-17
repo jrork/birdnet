@@ -27,6 +27,9 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    networks:
+      - default
+      - frigate
     depends_on:
       - birdnet-web
 
@@ -58,4 +61,7 @@ services:
 networks:
   default:
     name: traefik
+    external: true
+  frigate:
+    name: frigate_default
     external: true

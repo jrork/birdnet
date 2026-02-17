@@ -5,6 +5,7 @@ import logging
 import sqlite3
 import json
 import select
+import hashlib
 import numpy as np
 import scipy.io.wavfile as wavfile
 import tensorflow as tf
@@ -22,7 +23,6 @@ OUTPUT_DIR     = os.environ.get('OUTPUT_DIR', '/data')
 DB_PATH        = os.environ.get('DB_PATH', '/data/birdnet.db')
 LAT            = os.environ.get('LAT', '0.0')
 LON            = os.environ.get('LON', '0.0')
-WEEK           = os.environ.get('WEEK', str(datetime.utcnow().isocalendar()[1]))
 SF_THRESH      = os.environ.get('SF_THRESH', '0.10')
 YAMNET_THRESH  = float(os.environ.get('YAMNET_THRESH', '0.25'))
 MIN_CONFIDENCE = float(os.environ.get('MIN_CONFIDENCE', '0.10'))
@@ -47,6 +47,7 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger("BirdStream")
+logger.info("Config: LAT=%s LON=%s YAMNET_THRESH=%s MIN_CONFIDENCE=%s", LAT, LON, YAMNET_THRESH, MIN_CONFIDENCE)
 
 # ── DATABASE ────────────────────────────────────────────────────────
 def init_db():
@@ -119,16 +120,29 @@ with open('/app/yamnet_class_map.csv', 'r') as f:
     next(reader)  # skip header
     yamnet_labels = {int(row[0]): row[2] for row in reader}
 
-# YAMNet class indices for all bird-related sounds
-BIRD_CLASS_INDICES = set()
-BIRD_KEYWORDS = {'bird', 'chirp', 'tweet', 'squawk', 'pigeon', 'dove', 'crow',
-                 'caw', 'owl', 'hoot', 'fowl', 'chicken', 'rooster', 'crowing',
-                 'cock-a-doodle', 'duck', 'quack', 'goose', 'honk',
-                 'bird flight', 'flapping wings', 'coo'}
-for idx, name in yamnet_labels.items():
-    if any(kw in name.lower() for kw in BIRD_KEYWORDS):
-        BIRD_CLASS_INDICES.add(idx)
-        logger.info("Bird class %d: %s", idx, name)
+# YAMNet class indices for all bird-related sounds (explicit to avoid false positives
+# from substring matching, e.g. "microwave" contains "crow", "howl" contains "owl")
+BIRD_CLASS_INDICES = {
+    93,   # Fowl
+    94,   # Chicken, rooster
+    96,   # Crowing, cock-a-doodle-doo
+    99,   # Duck
+    100,  # Quack
+    101,  # Goose
+    106,  # Bird
+    107,  # Bird vocalization, bird call, bird song
+    108,  # Chirp, tweet
+    109,  # Squawk
+    110,  # Pigeon, dove
+    111,  # Coo
+    112,  # Crow
+    113,  # Caw
+    114,  # Owl
+    115,  # Hoot
+    116,  # Bird flight, flapping wings
+}
+for idx in BIRD_CLASS_INDICES:
+    logger.info("Bird class %d: %s", idx, yamnet_labels.get(idx, '?'))
 
 # ── FFMPEG PROCESS ──────────────────────────────────────────────────
 def get_ffmpeg_proc():
@@ -150,18 +164,22 @@ def is_bird_present(audio_np):
     _diag_counter += 1
     audio = audio_np.astype(np.float32) / 32768.0
     scores, _, _ = yamnet_model(audio)
-    mean_scores = tf.reduce_mean(scores, axis=0).numpy()
-    top10 = np.argsort(mean_scores)[-10:][::-1]
 
-    # Log diagnostics every 60 chunks (~5 min at 5s chunks)
+    # Per-frame max: catches brief sounds (e.g. owl hoot) that get averaged away by mean
+    max_scores = tf.reduce_max(scores, axis=0).numpy()
+    top10 = np.argsort(max_scores)[-10:][::-1]
+
+    # Diagnostic logging uses mean scores for stable trend monitoring
     if _diag_counter % 60 == 0:
-        top_labels = [(yamnet_labels.get(i, '?'), mean_scores[i]) for i in top10[:5]]
+        mean_scores = tf.reduce_mean(scores, axis=0).numpy()
+        diag_top10 = np.argsort(mean_scores)[-10:][::-1]
+        top_labels = [(yamnet_labels.get(i, '?'), mean_scores[i]) for i in diag_top10[:5]]
         logger.info("YAMNet top-5: %s", ", ".join(f"{l} ({s:.3f})" for l, s in top_labels))
 
     for idx in top10:
-        if idx in BIRD_CLASS_INDICES and mean_scores[idx] >= YAMNET_THRESH:
+        if idx in BIRD_CLASS_INDICES and max_scores[idx] >= YAMNET_THRESH:
             label = yamnet_labels.get(idx, f"class_{idx}")
-            logger.info("YAMNet detected bird: %s (%.3f)", label, mean_scores[idx])
+            logger.info("YAMNet detected bird: %s (max=%.3f)", label, max_scores[idx])
             return True
     return False
 
@@ -200,14 +218,15 @@ def parse_birdnet_results(txt_path):
 
 # ── SEND TO BIRDNET ─────────────────────────────────────────────────
 def analyze_with_birdnet(wav_path):
-    logger.info("Analyzing with BirdNET-Analyzer: %s", wav_path)
+    week = os.environ.get('WEEK', '') or str(datetime.utcnow().isocalendar()[1])
+    logger.info("Analyzing with BirdNET-Analyzer: %s (week=%s)", wav_path, week)
     try:
         subprocess.run([
             "python3", "-m", "birdnet_analyzer.analyze",
             "-o", OUTPUT_DIR,
             "--lat", LAT,
             "--lon", LON,
-            "--week", WEEK,
+            "--week", week,
             "--sf_thresh", SF_THRESH,
             "--min_conf", str(MIN_CONFIDENCE),
             "--top_n", "3",
@@ -242,6 +261,9 @@ def main():
 
     proc = get_ffmpeg_proc()
     chunk_count = 0
+    last_chunk_hash = None
+    stale_count = 0
+    STALE_LIMIT = 3  # consecutive identical chunks before reconnect
     try:
         while True:
             # Wait for data with timeout to detect hung streams
@@ -251,6 +273,8 @@ def main():
                 proc.kill()
                 proc = get_ffmpeg_proc()
                 chunk_count = 0
+                last_chunk_hash = None
+                stale_count = 0
                 continue
 
             raw = proc.stdout.read(CHUNK_SIZE)
@@ -259,7 +283,26 @@ def main():
                 proc.kill()
                 proc = get_ffmpeg_proc()
                 chunk_count = 0
+                last_chunk_hash = None
+                stale_count = 0
                 continue
+
+            # Detect stale/frozen audio stream
+            chunk_hash = hashlib.md5(raw).hexdigest()
+            if chunk_hash == last_chunk_hash:
+                stale_count += 1
+                if stale_count >= STALE_LIMIT:
+                    logger.error("Stale audio detected: %d consecutive identical chunks (%ds) - reconnecting…",
+                                 stale_count, stale_count * CHUNK_DUR)
+                    proc.kill()
+                    proc = get_ffmpeg_proc()
+                    chunk_count = 0
+                    last_chunk_hash = None
+                    stale_count = 0
+                    continue
+            else:
+                stale_count = 0
+            last_chunk_hash = chunk_hash
 
             chunk_count += 1
             # Log heartbeat every 12 chunks (~1 minute at 5s chunks)
