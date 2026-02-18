@@ -46,13 +46,7 @@ services:
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock
     ports:
-      - "5088:5000"
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.birdnet.rule=Host(`${BIRDNET_HOST:-birdnet.local}`)"
-      - "traefik.http.routers.birdnet.entrypoints=websecure"
-      - "traefik.http.routers.birdnet.tls.certresolver=letsencrypt"
-      - "traefik.http.services.birdnet.loadbalancer.server.port=5000"
+      - "${BIRDNET_PORT:-5088}:5000"
     logging:
       driver: json-file
       options:
