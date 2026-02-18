@@ -37,10 +37,11 @@ services:
     build: .
     container_name: birdnet-web
     restart: unless-stopped
-    command: gunicorn -w 2 -b 0.0.0.0:5000 web_app:app
+    command: gunicorn -w 4 --threads 2 -b 0.0.0.0:5000 web_app:app
     environment:
       - DB_PATH=/data/birdnet.db
       - AUDIO_DIR=/data
+      - RTSP_URL=${RTSP_URL}
     volumes:
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock

@@ -87,7 +87,7 @@ mqtt_client = None
 def init_mqtt():
     global mqtt_client
     try:
-        mqtt_client = mqtt.Client(client_id="birdnet-detector")
+        mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="birdnet-detector")
         if MQTT_USER:
             mqtt_client.username_pw_set(MQTT_USER, MQTT_PASS)
         mqtt_client.connect(MQTT_HOST, MQTT_PORT, 60)
@@ -146,10 +146,9 @@ for idx in BIRD_CLASS_INDICES:
 
 # ── FFMPEG PROCESS ──────────────────────────────────────────────────
 def get_ffmpeg_proc():
-    filter_chain = "highpass=f=200,lowpass=f=8000,afftdn"
     cmd = [
         "ffmpeg", "-rtsp_transport", "tcp", "-i", RTSP_URL,
-        "-vn", "-af", filter_chain,
+        "-vn",
         "-f", "s16le", "-acodec", "pcm_s16le",
         "-ac", str(CHANNELS), "-ar", str(SR), "-"
     ]
@@ -185,7 +184,11 @@ def is_bird_present(audio_np):
 
 # ── SAVE AUDIO ──────────────────────────────────────────────────────
 def save_wav(path, audio_np):
-    wavfile.write(path, SR, audio_np)
+    from scipy.signal import butter, sosfilt
+    # Apply 200Hz highpass to clean up wind/traffic in saved recordings
+    sos = butter(4, 200, btype='highpass', fs=SR, output='sos')
+    filtered = sosfilt(sos, audio_np.astype(np.float32)).astype(np.int16)
+    wavfile.write(path, SR, filtered)
     logger.info("Saved WAV: %s", path)
 
 # ── PARSE BIRDNET RESULTS ───────────────────────────────────────────
@@ -259,6 +262,9 @@ def main():
     init_mqtt()
     cleanup_old_txt_files()
 
+    SPECIES_COOLDOWN = 3600  # seconds before saving audio for same species again
+    recent_species = {}      # species_code -> last detection datetime
+
     proc = get_ffmpeg_proc()
     chunk_count = 0
     last_chunk_hash = None
@@ -315,26 +321,33 @@ def main():
                 timestamp_iso = datetime.utcnow().isoformat() + "Z"
                 wav_path = os.path.join(OUTPUT_DIR, f"bird_{ts}.wav")
                 save_wav(wav_path, audio_np)
-                
+
                 detections = analyze_with_birdnet(wav_path)
-                
+
                 if detections:
-                    # Use highest confidence detection
                     best = max(detections, key=lambda x: x['confidence'])
-                    save_detection(
-                        timestamp_iso,
-                        best['common_name'],
-                        best['species_code'],
-                        best['confidence'],
-                        wav_path
-                    )
-                    publish_detection(
-                        timestamp_iso,
-                        best['common_name'],
-                        best['species_code'],
-                        best['confidence'],
-                        wav_path
-                    )
+                    now = datetime.utcnow()
+                    species = best['species_code']
+                    last_seen = recent_species.get(species)
+
+                    if last_seen and (now - last_seen).total_seconds() < SPECIES_COOLDOWN:
+                        # Repeat species within cooldown — log, publish, but discard audio
+                        os.remove(wav_path)
+                        logger.info("Repeat species %s (%.1f%%), removed audio",
+                                    best['common_name'], best['confidence'] * 100)
+                        save_detection(timestamp_iso, best['common_name'], species,
+                                       best['confidence'], None)
+                        publish_detection(timestamp_iso, best['common_name'], species,
+                                          best['confidence'], None)
+                    else:
+                        # New or cooled-down species — keep the recording
+                        logger.info("New species detection: %s (%.1f%%)",
+                                    best['common_name'], best['confidence'] * 100)
+                        save_detection(timestamp_iso, best['common_name'], species,
+                                       best['confidence'], wav_path)
+                        publish_detection(timestamp_iso, best['common_name'], species,
+                                          best['confidence'], wav_path)
+                    recent_species[species] = now
                 else:
                     # No confident detection, remove the wav file
                     os.remove(wav_path)
