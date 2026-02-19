@@ -6,13 +6,17 @@ import sqlite3
 import json
 import select
 import hashlib
+import tempfile
+import threading
+import urllib.parse
 import numpy as np
 import scipy.io.wavfile as wavfile
 import tensorflow as tf
 import tensorflow_hub as hub
 import csv
 import paho.mqtt.client as mqtt
-from datetime import datetime
+import requests
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ── ENVIRONMENT ─────────────────────────────────────────────────────
@@ -33,6 +37,21 @@ MQTT_PORT      = int(os.environ.get('MQTT_PORT', 1883))
 MQTT_USER      = os.environ.get('MQTT_USER', '')
 MQTT_PASS      = os.environ.get('MQTT_PASS', '')
 MQTT_TOPIC     = os.environ.get('MQTT_TOPIC', 'birdnet/detection')
+
+# BirdWeather integration (disabled by default)
+# Token can be set via env var OR via web config file
+def _get_birdweather_token():
+    token = os.environ.get('BIRDWEATHER_TOKEN', '')
+    if not token:
+        config_path = os.environ.get('CONFIG_PATH', '/data/config.json')
+        try:
+            with open(config_path) as f:
+                token = json.load(f).get('birdweather_token', '')
+        except Exception:
+            pass
+    return token
+
+BIRDWEATHER_TOKEN = _get_birdweather_token()
 
 CHANNELS    = 1
 BYTES_PER_S = 2
@@ -111,6 +130,102 @@ def publish_detection(timestamp, common_name, species_code, confidence, audio_fi
     })
     mqtt_client.publish(MQTT_TOPIC, payload, qos=1)
     logger.info("Published to MQTT: %s", MQTT_TOPIC)
+
+# ── BIRDWEATHER ────────────────────────────────────────────────────
+# Build common_name -> scientific_name lookup from BirdNET labels
+_scientific_names = {}
+_LABELS_JSON = '/usr/local/lib/python3.11/site-packages/birdnet_analyzer/checkpoints/V2.4/BirdNET_GLOBAL_6K_V2.4_Model_TFJS/static/model/labels.json'
+
+def _load_scientific_names():
+    global _scientific_names
+    try:
+        with open(_LABELS_JSON) as f:
+            for entry in json.load(f):
+                sci, common = entry.split('_', 1)
+                _scientific_names[common] = sci
+        logger.info("Loaded %d scientific name mappings", len(_scientific_names))
+    except Exception as e:
+        logger.warning("Could not load BirdNET labels for scientific names: %s", e)
+
+def _wav_to_flac(wav_path):
+    """Convert WAV to FLAC bytes using ffmpeg."""
+    with tempfile.NamedTemporaryFile(suffix='.flac', delete=False) as tmp:
+        flac_path = tmp.name
+    try:
+        subprocess.run([
+            'ffmpeg', '-i', wav_path,
+            '-c:a', 'flac', '-f', 'flac', '-y', flac_path
+        ], check=True, capture_output=True)
+        with open(flac_path, 'rb') as f:
+            return f.read()
+    finally:
+        if os.path.exists(flac_path):
+            os.unlink(flac_path)
+
+def _submit_birdweather(wav_path, common_name, confidence, timestamp_iso):
+    """Submit a detection to BirdWeather (called in background thread)."""
+    try:
+        scientific_name = _scientific_names.get(common_name, '')
+        if not scientific_name:
+            logger.warning("BirdWeather: no scientific name for '%s', skipping", common_name)
+            return
+
+        base_url = f"https://app.birdweather.com/api/v1/stations/{BIRDWEATHER_TOKEN}"
+
+        # Parse the UTC timestamp and format with offset for BirdWeather
+        dt = datetime.fromisoformat(timestamp_iso.replace('Z', '+00:00'))
+        ts = dt.isoformat(timespec='milliseconds')
+        ts_end = dt.replace(second=min(dt.second + CHUNK_DUR, 59)).isoformat(timespec='milliseconds')
+
+        # Step 1: Upload audio as FLAC
+        flac_data = _wav_to_flac(wav_path)
+        soundscape_url = (
+            f"{base_url}/soundscapes"
+            f"?timestamp={urllib.parse.quote(ts)}&type=flac"
+        )
+        resp = requests.post(
+            soundscape_url,
+            data=flac_data,
+            headers={'Content-Type': 'application/octet-stream', 'User-Agent': 'BirdNET-Analyzer'},
+            timeout=45
+        )
+        if resp.status_code != 201:
+            logger.warning("BirdWeather soundscape upload failed: %d %s", resp.status_code, resp.text[:200])
+            return
+
+        soundscape_id = resp.json()['soundscape']['id']
+
+        # Step 2: Post detection
+        payload = {
+            "timestamp": ts,
+            "lat": float(LAT),
+            "lon": float(LON),
+            "soundscapeId": soundscape_id,
+            "soundscapeStartTime": ts,
+            "soundscapeEndTime": ts_end,
+            "commonName": common_name,
+            "scientificName": scientific_name,
+            "algorithm": "2p4",
+            "confidence": f"{confidence:.2f}"
+        }
+        resp = requests.post(f"{base_url}/detections", json=payload, timeout=45)
+        if resp.status_code != 201:
+            logger.warning("BirdWeather detection post failed: %d %s", resp.status_code, resp.text[:200])
+            return
+
+        logger.info("BirdWeather: submitted %s (%.0f%%) soundscape=%d", common_name, confidence * 100, soundscape_id)
+
+    except Exception as e:
+        logger.warning("BirdWeather submission failed: %s", e)
+
+def submit_to_birdweather(wav_path, common_name, confidence, timestamp_iso):
+    """Fire-and-forget BirdWeather submission in a background thread."""
+    if not BIRDWEATHER_TOKEN:
+        return
+    if wav_path is None or not os.path.exists(wav_path):
+        return
+    t = threading.Thread(target=_submit_birdweather, args=(wav_path, common_name, confidence, timestamp_iso), daemon=True)
+    t.start()
 
 # ── LOAD YAMNET ─────────────────────────────────────────────────────
 logger.info("Loading YAMNet model from TF-Hub…")
@@ -260,6 +375,9 @@ def cleanup_old_txt_files():
 def main():
     init_db()
     init_mqtt()
+    _load_scientific_names()
+    if BIRDWEATHER_TOKEN:
+        logger.info("BirdWeather integration enabled (token set)")
     cleanup_old_txt_files()
 
     SPECIES_COOLDOWN = 3600  # seconds before saving audio for same species again
@@ -347,6 +465,8 @@ def main():
                                        best['confidence'], wav_path)
                         publish_detection(timestamp_iso, best['common_name'], species,
                                           best['confidence'], wav_path)
+                        submit_to_birdweather(wav_path, best['common_name'],
+                                              best['confidence'], timestamp_iso)
                     recent_species[species] = now
                 else:
                     # No confident detection, remove the wav file

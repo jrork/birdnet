@@ -20,6 +20,7 @@ services:
       - MQTT_USER=${MQTT_USER}
       - MQTT_PASS=${MQTT_PASS}
       - MQTT_TOPIC=birdnet/detection
+      - BIRDWEATHER_TOKEN=${BIRDWEATHER_TOKEN:-}
     volumes:
       - ./data:/data
     logging:

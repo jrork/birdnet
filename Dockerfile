@@ -26,6 +26,7 @@ RUN pip install --upgrade pip setuptools wheel \
       scipy \
       soundfile \
       paho-mqtt \
+      requests \
       flask \
       gunicorn \
       docker \

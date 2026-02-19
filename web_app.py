@@ -28,7 +28,8 @@ DEFAULT_CONFIG = {
     'chunk_duration': 5,
     'latitude': 0.0,
     'longitude': 0.0,
-    'week': 1
+    'week': 1,
+    'birdweather_token': ''
 }
 
 def load_config():
@@ -412,6 +413,25 @@ HTML_TEMPLATE = '''
                         <div class="setting-hint">Length of audio clips to analyze (3-15s)</div>
                     </div>
                 </div>
+
+                <div class="setting-group">
+                    <h3>BirdWeather</h3>
+                    <div class="setting-item">
+                        <label for="birdweather_token">Station Token</label>
+                        <input type="password" id="birdweather_token" placeholder="Paste station token" autocomplete="off">
+                        <div class="setting-hint">
+                            <span id="bw-status" style="font-weight: bold;"></span>
+                            Shares detections with the <a href="https://www.birdweather.com/" target="_blank" style="color: var(--accent);">BirdWeather</a> community network.
+                            <a href="https://app.birdweather.com/account/stations" target="_blank" style="color: var(--accent);">Get a token</a>
+                        </div>
+                    </div>
+                    <div class="setting-item">
+                        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                            <input type="checkbox" id="bw-show-token" style="width: auto;">
+                            Show token
+                        </label>
+                    </div>
+                </div>
             </div>
             
             <div style="margin-top: 20px; text-align: center;">
@@ -436,6 +456,11 @@ HTML_TEMPLATE = '''
             });
         });
         
+        // BirdWeather token show/hide toggle
+        document.getElementById('bw-show-token').addEventListener('change', function() {
+            document.getElementById('birdweather_token').type = this.checked ? 'text' : 'password';
+        });
+
         function formatTime(isoString) {
             const date = new Date(isoString);
             return date.toLocaleString();
@@ -555,6 +580,17 @@ HTML_TEMPLATE = '''
                 document.getElementById('latitude').value = config.latitude;
                 document.getElementById('longitude').value = config.longitude;
                 document.getElementById('week').value = config.week;
+
+                const bwToken = config.birdweather_token || '';
+                document.getElementById('birdweather_token').value = bwToken;
+                const bwStatus = document.getElementById('bw-status');
+                if (bwToken) {
+                    bwStatus.textContent = 'Enabled. ';
+                    bwStatus.style.color = 'var(--success)';
+                } else {
+                    bwStatus.textContent = 'Disabled. ';
+                    bwStatus.style.color = 'var(--text-secondary)';
+                }
             } catch (err) {
                 console.error('Failed to load settings:', err);
             }
@@ -568,7 +604,8 @@ HTML_TEMPLATE = '''
                 chunk_duration: parseInt(document.getElementById('chunk_duration').value),
                 latitude: parseFloat(document.getElementById('latitude').value),
                 longitude: parseFloat(document.getElementById('longitude').value),
-                week: parseInt(document.getElementById('week').value)
+                week: parseInt(document.getElementById('week').value),
+                birdweather_token: document.getElementById('birdweather_token').value.trim()
             };
             
             try {
