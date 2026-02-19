@@ -28,7 +28,6 @@ DEFAULT_CONFIG = {
     'chunk_duration': 5,
     'latitude': 0.0,
     'longitude': 0.0,
-    'week': 1,
     'birdweather_token': ''
 }
 
@@ -398,11 +397,6 @@ HTML_TEMPLATE = '''
                         <label for="longitude">Longitude</label>
                         <input type="number" id="longitude" min="-180" max="180" step="0.00001" value="0.0">
                     </div>
-                    <div class="setting-item">
-                        <label for="week">Week of Year</label>
-                        <input type="number" id="week" min="1" max="52" value="1">
-                        <div class="setting-hint">Used for seasonal species filtering</div>
-                    </div>
                 </div>
                 
                 <div class="setting-group">
@@ -579,7 +573,6 @@ HTML_TEMPLATE = '''
                 document.getElementById('chunk_duration').value = config.chunk_duration;
                 document.getElementById('latitude').value = config.latitude;
                 document.getElementById('longitude').value = config.longitude;
-                document.getElementById('week').value = config.week;
 
                 const bwToken = config.birdweather_token || '';
                 document.getElementById('birdweather_token').value = bwToken;
@@ -604,7 +597,6 @@ HTML_TEMPLATE = '''
                 chunk_duration: parseInt(document.getElementById('chunk_duration').value),
                 latitude: parseFloat(document.getElementById('latitude').value),
                 longitude: parseFloat(document.getElementById('longitude').value),
-                week: parseInt(document.getElementById('week').value),
                 birdweather_token: document.getElementById('birdweather_token').value.trim()
             };
             
